@@ -19,6 +19,8 @@ rag-system/
 │   └── rag_bm25_faiss.py
 │   └── rag_lc_bge.py
 │   └── rag_lc_bert.py
+│   └── config_parse.py
+│   └── llm.py
 ├── tests/
 │   └── rag_test.ipynb
 │   └── laws_accuracy_test.ipynb
