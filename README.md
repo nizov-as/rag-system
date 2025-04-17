@@ -9,14 +9,19 @@ rag-system/
 ├── .gitignore
 ├── main.py
 ├── config/
-│   └── config_10.ini
+│   ├── config_10.ini
+│   └── config_lc_bge.ini
+│   └── config_lc_bert.ini
 ├── data/
 │   └── documents/
 ├── modules/
-│   ├── core.py
-│   └── split_util.py
+│   ├── split_util.py
+│   └── rag_bm25_faiss.py
+│   └── rag_lc_bge.py
+│   └── rag_lc_bert.py
 ├── tests/
 │   └── rag_test.ipynb
+│   └── laws_accuracy_test.ipynb
 ```
 
 **Ноутбук с запуском модулей и тестированием системы находится в tests/rag_test.ipynb**
