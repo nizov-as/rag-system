@@ -2,28 +2,18 @@ import re
 import logging
 from split_util import RecursiveCharacterTextSplitter
 from split_util import Doc
-import pandas as pd
 import numpy as np
 import os
 import re
 import pickle as pkl
-from datetime import datetime
-import inspect
-import configparser
-from tqdm.notebook import tqdm
-from dataclasses import dataclass
-import random
-#import bm25s
 from rank_bm25 import BM25Okapi # type: ignore
-#from rank_bm25 import BM25Okapi # type: ignore
 from nltk.stem import SnowballStemmer
 from nltk.tokenize import word_tokenize
 import nltk
 import torch
 import torch.nn as nn
-
 from sentence_transformers import CrossEncoder
-from transformers import AutoTokenizer, AutoModelForMaskedLM, AutoConfig, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForMaskedLM, AutoConfig
 import string
 
 logger = logging.getLogger(__name__)
@@ -93,71 +83,6 @@ def idx_match(groups):
             break
     return idx
 
-'''
-def level1_split(doc, tokenizer):
-    """
-    Разбивает документ по пунктам/подпунктам (первый уровень) и вычисляет global_token_offset для каждого чанка.
-
-    Parameters:
-         doc: Документ (объект Doc) с атрибутами page_content и metadata.
-         tokenizer: Токенизатор, используемый для вычисления глобального смещения токенов.
-    Returns:
-         ls_doc: список объектов Doc, каждый из которых содержит текст раздела 
-                 и в metadata добавлены ключи:
-                   - "char_span": кортеж (start, end) глобальных символьных границ чанка,
-                   - "global_token_offset": число токенов, предшествующих началу чанка.
-    """
-    txt = doc.page_content
-    source = doc.metadata['source']
-
-    # Регулярное выражение для разделителей вида "1. ", "1.1. ", "1.1.1. ", "1.1.1.1. "
-    pat_02 = r"(\n\s*\d+\. )|(\n\s*\d+\.\d+\. )|(\n\s*\d+\.\d+\.\d+\. )|(\n\s*\d+\.\d+\.\d+\.\d+\. )"
-    m_iterator = re.finditer(pat_02, txt)
-    l_match = list(m_iterator)
-    # Если разделителей нет, считаем весь текст одним чанком:
-    metadata0 = {'source': source, 'level1_name': '', 'level1_id': '', 'char_span': (0, len(txt))}
-    # Для полного текста смещение равно 0
-    metadata0["global_token_offset"] = 0
-
-    if len(l_match) > 0:
-        ls_tec = []
-        for m in l_match:
-            idx = idx_match(m.groups()) 
-            group = m.group().replace("\n", "")
-            span = m.span()  # span[0] – начало разделителя
-            metadata = {'source': source, 'level1_name': group, 'level1_id': idx, 'start': span[0]}
-            ls_tec.append((span[0], metadata))
-        
-        # Подготавливаем пары: первая точка – начало чанка, вторая – начало следующего разделителя
-        ls_tec1 = [(0, metadata0)] + ls_tec[:-1]
-        ls2 = list(zip(ls_tec1, ls_tec))
-        
-        ls_doc = []
-        for (start, meta_start), (next_start, _) in ls2:
-            chunk_span = (start, next_start)
-            chunk_length = next_start - start
-            # Если не первый чанк и его длина меньше 500 символов – объединяем с предыдущим чанком
-            if ls_doc and chunk_length < 500:
-                prev_doc = ls_doc[-1]
-                prev_start = prev_doc.metadata['char_span'][0]
-                new_span = (prev_start, next_start)
-                new_text = txt[prev_start:next_start]
-                # Обновляем предыдущий документ: расширяем его границы и текст
-                prev_doc.page_content = new_text
-                prev_doc.metadata['char_span'] = new_span
-                # global_token_offset остаётся без изменений (от начала предыдущего чанка)
-            else:
-                new_meta = meta_start.copy()
-                new_meta['char_span'] = chunk_span
-                # Вычисляем global_token_offset: число токенов до начала чанка
-                tokens_before = tokenizer(txt[:start], add_special_tokens=False)['input_ids']
-                new_meta["global_token_offset"] = len(tokens_before)
-                chunk_text = txt[start:next_start]
-                ls_doc.append(Doc(page_content=chunk_text, metadata=new_meta))
-    else:
-        ls_doc = [Doc(page_content=txt, metadata=metadata0)]
-    return ls_doc
-'''
 
 def level0_split(doc, tokenizer):
     """
@@ -177,7 +102,7 @@ def level0_split(doc, tokenizer):
     txt = doc.page_content
     source = doc.metadata['source']
     
-    # Ищем строки, начинающиеся с "Статья" (с возможными пробелами) и захватываем номер и заголовок до конца строки.
+    # Ищем строки, начинающиеся с "Статья" (с возможными пробелами) и захватываем номер и заголовок до конца строки
     pat_01 = r"^\s*Статья\s+(\d+(?:\.\d+)*\.\s*.+)$"
     m_iterator = re.finditer(pat_01, txt, flags=re.MULTILINE)
     ls_tec = []
@@ -191,27 +116,25 @@ def level0_split(doc, tokenizer):
         "global_token_offset": 0
     }
     
-    # Собираем найденные статьи: group(1) содержит номер и заголовок.
+    # Собираем найденные статьи: group(1) содержит номер и заголовок
     for m in m_iterator:
         idx = idx_match(m.groups())
         group = m.group(1).strip()
-        span = m.span()  # начало найденного совпадения
+        span = m.span()  # Начало найденного совпадения
         metadata = {'source': source, 'level0_name': group, 'level0_id': idx}
         ls_tec.append((span[0], metadata))
     
-    # Если статьи не найдены – возвращаем весь текст как один чанк.
+    # Если статьи не найдены – возвращаем весь текст как один чанк
     if not ls_tec:
-        # Вычисляем global_token_offset для всего текста (будет 0)
-        tokens_before = tokenizer(txt[:0], add_special_tokens=False)['input_ids']
+        tokens_before = tokenizer(txt[:0], add_special_tokens=False)['input_ids'] # Вычисляем global_token_offset для всего текста (будет 0)
         metadata0["global_token_offset"] = len(tokens_before)
         return [Doc(page_content=txt, metadata=metadata0)]
     else:
         metadata0['char_span'] = (0, ls_tec[0][0])
-    
-    # Добавляем конечную метку, чтобы захватить текст от последнего совпадения до конца документа
+
     ls_tec.append((len(txt) + 1000, metadata0))
     
-    # Формируем пары: первый чанк – от начала документа до первого найденного разделителя, затем между статьями.
+    # Формируем пары: первый чанк – от начала документа до первого найденного разделителя, затем между статьями
     ls_tec1 = [(0, metadata0)] + ls_tec
     ls2 = list(zip(ls_tec1, ls_tec))
     
@@ -220,12 +143,10 @@ def level0_split(doc, tokenizer):
         chunk_span = (start, next_start)
         new_meta = meta_start.copy()
         new_meta['char_span'] = chunk_span
-        # Вычисляем global_token_offset: число токенов от начала документа до позиции start
-        tokens_before = tokenizer(txt[:start], add_special_tokens=False)['input_ids']
+        tokens_before = tokenizer(txt[:start], add_special_tokens=False)['input_ids'] # Вычисляем global_token_offset: число токенов от начала документа до позиции start
         new_meta["global_token_offset"] = len(tokens_before)
         chunk_text = txt[start:next_start]
         ls_doc.append(Doc(page_content=chunk_text, metadata=new_meta))
-    #print(f"Найдено {len(ls_doc)} статей!")
     return ls_doc
 
 
@@ -236,23 +157,16 @@ def level1_split(doc, tokenizer):
     то при вычислении глобального смещения для подраздела используется базовый offset родителя.
     
     Parameters:
-         doc: Документ (объект Doc) с атрибутами page_content и metadata, полученный из level0_split.
-              metadata содержит: 'level0_name', 'level0_id', 'char_span' — глобальные границы родительского чанка,
-              'global_token_offset' — число токенов от начала документа до начала родительского чанка.
-         tokenizer: Токенизатор, используемый для вычисления глобального смещения токенов.
+        doc: Документ (объект Doc) с атрибутами page_content и metadata, полученный из level0_split и метаданные
+        tokenizer: Токенизатор, используемый для вычисления глобального смещения токенов.
     Returns:
-         ls_doc: список объектов Doc, каждый из которых содержит текст подраздела 
-                 и в metadata добавлены ключи:
-                   - "char_span": кортеж (global_start, global_end) глобальных символьных границ подраздела,
-                   - "global_token_offset": число токенов от начала документа до подраздела.
-                   Кроме того, сохраняются родительские метаданные уровня 0 (level0_name, level0_id).
+        ls_doc: список объектов Doc, каждый из которых содержит текст подраздела и метаданные
     """
     txt = doc.page_content
     source = doc.metadata['source']
     level0_name = doc.metadata.get('level0_name', '')
     level0_id = doc.metadata.get('level0_id', '')
     
-    # Извлекаем глобальные границы родительского чанка и его global_token_offset.
     parent_char_span = doc.metadata.get('char_span', (0, len(txt)))
     parent_global_token_offset = doc.metadata.get("global_token_offset", 0)
 
@@ -269,7 +183,6 @@ def level1_split(doc, tokenizer):
         return [Doc(page_content=txt, metadata=meta_start)]
 
     # Регулярное выражение для поиска разделителей подразделов (пунктов)
-    #pat_02 = r"(\n\s*\d+\. )|(\n\s*\d+\.\d+\. )|(\n\s*\d+\.\d+\.\d+\. )|(\n\s*\d+\.\d+\.\d+\.\d+\. )"
     pat_02 = r"(\n\s*\d+\. )|(\n\s*\d+\.\d+\. )"
     m_iterator = re.finditer(pat_02, txt)
     l_match = list(m_iterator)
@@ -310,41 +223,25 @@ def level1_split(doc, tokenizer):
         }
         ls_tec.append((span[0], metadata))
     
-    # Формируем пары: от начала текста до первого разделителя, затем между разделителями.
+    # Формируем пары: от начала текста до первого разделителя, затем между разделителями
     ls_tec1 = [(0, metadata0)] + ls_tec[:-1]
     ls2 = list(zip(ls_tec1, ls_tec))
     ls_doc = []
     
     for (start, meta_start), (next_start, _) in ls2:
-        # Преобразуем локальные смещения в глобальные, прибавляя начало родительского чанка.
+        # Преобразуем локальные смещения в глобальные, прибавляя начало родительского чанка
         global_start = parent_char_span[0] + start
         global_end = parent_char_span[0] + next_start
         global_char_span = (global_start, global_end)
-        #chunk_length = next_start - start
-        # Если не первый подраздел и его длина меньше 500 символов – объединяем с предыдущим
-        '''
-        if ls_doc and chunk_length < 500:
-            prev_doc = ls_doc[-1]
-            prev_start = prev_doc.metadata['char_span'][0]
-            new_span = (prev_start, global_end)
-            # Вычисляем локальный диапазон для объединения:
-            local_prev_start = prev_doc.metadata['char_span'][0] - parent_char_span[0]
-            new_text = txt[local_prev_start: next_start]
-            prev_doc.page_content = new_text
-            prev_doc.metadata['char_span'] = new_span
-            # global_token_offset остаётся прежним (начало предыдущего подраздела)
-        else:
-        '''
         new_meta = meta_start.copy()
         new_meta['char_span'] = global_char_span
-        # Вычисляем global_token_offset для подраздела:
-        tokens_before = tokenizer(txt[:start], add_special_tokens=False)['input_ids']
+
+        tokens_before = tokenizer(txt[:start], add_special_tokens=False)['input_ids'] # Вычисляем global_token_offset для подраздела
         new_meta["global_token_offset"] = parent_global_token_offset + len(tokens_before)
         chunk_text = txt[start:next_start]
         if len(chunk_text.strip()) < 400:
             continue 
         ls_doc.append(Doc(page_content=chunk_text, metadata=new_meta))
-    #print(f"Найдено {len(ls_doc)} пунктов!")
     return ls_doc
 
 
@@ -357,18 +254,13 @@ def level2_split(doc, text_splitter, tokenizer):
     Parameters:
         doc: Объект Doc, содержащий:
             - page_content: текст чанка (часть исходного текста, полученная на уровне 1)
-            - metadata: словарь, содержащий по крайней мере ключ 'source' и 'level1_name', 'level1_id',
-                        а также 'char_span' — кортеж (global_start, global_end) для этого чанка.
-                        Опционально может содержать 'global_token_offset' — сдвиг токенов для этого чанка.
+            - metadata: словарь, содержаний метаданные
         text_splitter: Объект с методом split_text(text) для разбиения текста на подчанки.
                        Должен также иметь атрибут chunk_overlap (количество символов перекрытия).
         tokenizer: Токенизатор, поддерживающий параметр return_offsets_mapping=True.
-    
+
     Returns:
-        ls_doc: Список объектов Doc, каждый из которых представляет подчанок с дополненными метаданными:
-                - 'char_span': глобальные границы подчанка,
-                - 'token_span': кортеж (token_start, token_end) в глобальной индексации токенов,
-                - 'token_count': число токенов в подчанке.
+        ls_doc: Список объектов Doc, каждый из которых представляет подчанок с дополненными метаданными
     """
     txt = doc.page_content  
     source = doc.metadata.get('source', '')
@@ -380,21 +272,21 @@ def level2_split(doc, text_splitter, tokenizer):
     parent_char_start = parent_char_span[0]
     global_token_offset = doc.metadata.get("global_token_offset", 0)
 
-    # Получаем offsets mapping для всего текста чанка первого уровня.
+    # Получаем offsets mapping для всего текста чанка первого уровня
     parent_encoded = tokenizer(txt, return_tensors="pt", return_offsets_mapping=True)
     parent_encoded = {key: value.to('cuda') for key, value in parent_encoded.items()}
     parent_offsets = parent_encoded['offset_mapping'] # Тензор [1, N, 2] с [token_start_char, token_end_char]
     tensor_cpu = parent_offsets.cpu()
     pairs = tensor_cpu[0]
 
-    # Если metadata содержит подраздел (level1_name не пуст), то не делим дальше, иначе – используем text_splitter.
+    # Если metadata содержит подраздел (level1_name не пуст), то не делим дальше, иначе – используем text_splitter
     if doc.metadata.get("level0_name"):
         ls_txt = [txt]
     else:
         ls_txt = text_splitter.split_text(txt)
 
     ls_doc = []
-    current_pos = 0  # локальная позиция в txt
+    current_pos = 0  # Локальная позиция в txt
     for k, chunk in enumerate(ls_txt):
         if len(chunk.strip()) < 400:
             current_pos += len(chunk)
@@ -404,16 +296,8 @@ def level2_split(doc, text_splitter, tokenizer):
         # С учётом перекрытия между подчанками
         if k < len(ls_txt) - 1:
             current_pos = local_end - 300
-        #elif (local_end - local_start) < 1000:
-        #    break 
         else:
             current_pos = local_end
-        '''
-        else:
-            if (local_end - local_start) < 1000:
-                break
-            current_pos = local_end
-        '''
 
         global_start = parent_char_start + local_start
         global_end = parent_char_start + local_end
@@ -449,113 +333,17 @@ def level2_split(doc, text_splitter, tokenizer):
     return ls_doc
 
 
-'''
-def level2_split(doc, text_splitter, tokenizer):
-    """
-    Делит документ (чанк первого уровня, полученный, например, из level1_split) на более мелкие части,
-    вычисляя для каждого подчанка его границы в символах и преобразовывая их в индексы токенов с использованием
-    токенизатора. Границы token_span возвращаются в глобальной системе (аналогично char_span).
-
-    Parameters:
-        doc: Объект Doc, содержащий:
-            - page_content: текст чанка (часть исходного текста, полученная на уровне 1)
-            - metadata: словарь, содержащий по крайней мере ключ 'source' и 'level1_name', 'level1_id',
-                        а также 'char_span' — кортеж (global_start, global_end) для этого чанка в исходном тексте.
-                        Опционально может содержать 'global_token_offset' — сдвиг токенов для этого чанка.
-        text_splitter: Объект, реализующий метод split_text(text) для разбиения текста на подчанки.
-                       Должен также иметь атрибут chunk_overlap (количество символов перекрытия).
-        tokenizer: Токенизатор модели, поддерживающий параметр return_offsets_mapping=True при токенизации.
-
-    Returns:
-        ls_doc: Список объектов Doc, каждый из которых представляет подчанок с дополненными метаданными:
-                - 'char_span': абсолютные границы подчанка в исходном тексте,
-                - 'token_span': кортеж (token_start, token_end) — границы подчанка в глобальной индексации токенов,
-                - 'token_count': количество токенов в подчанке.
-    """
-    # Текст чанка первого уровня
-    txt = doc.page_content  
-    source = doc.metadata.get('source', '')
-    level1_name = doc.metadata.get('level1_name', '')
-    level1_id = doc.metadata.get('level1_id', '')
-    # Глобальные (абсолютные) границы чанка первого уровня в исходном тексте.
-    parent_char_span = doc.metadata.get('char_span', (0, len(txt)))
-    parent_char_start = parent_char_span[0]
-    
-    # Сдвиг для глобальной токеновой индексации (если не указан, считаем, что локальные токены уже глобальные)
-    global_token_offset = doc.metadata.get("global_token_offset", 0)
-
-    # Получаем offsets mapping для всего текста чанка первого уровня.
-    # Эти offsets (от начала doc.page_content) позволяют сопоставить символьные позиции с токеновыми индексами.
-    parent_encoded = tokenizer(txt, return_offsets_mapping=True)
-    parent_offsets = parent_encoded.offset_mapping  # список кортежей (token_start_char, token_end_char)
-
-    # Если в metadata уже есть пункт, то делим текст на один чанк, иначе используем text_splitter.
-    if doc.metadata.get("level1_name"):
-        ls_txt = [txt]
-    else: 
-        ls_txt = text_splitter.split_text(txt)
-
-    ls_doc = []
-    current_pos = 0  # локальная позиция внутри txt
-    for k, chunk in enumerate(ls_txt):
-        local_start = current_pos
-        local_end = current_pos + len(chunk)
-        # Если не последний чанк — с учётом перекрытия
-        if k < len(ls_txt) - 1:
-            current_pos = local_end - 300
-        else:
-            if (local_end - local_start) < 1000:
-                break
-            current_pos = local_end
-
-        # Вычисляем глобальные границы подчанка в исходном тексте:
-        global_start = parent_char_start + local_start
-        global_end = parent_char_start + local_end
-
-        # Находим локальные токеновые границы относительно doc.page_content
-        token_start = None
-        token_end = None
-        for i, (tok_start, tok_end) in enumerate(parent_offsets):
-            # Первый токен, начинающийся не раньше, чем local_start
-            if token_start is None and tok_start >= local_start:
-                token_start = i
-            # Токены полностью попадают в подчанок: выбираем последний, у которого конец не превышает local_end
-            if tok_end <= local_end:
-                token_end = i + 1  # токен с индексом i включается в диапазон
-        if token_start is None:
-            token_start = 0
-        if token_end is None:
-            token_end = len(parent_offsets)
-        token_count = token_end - token_start
-
-        # Переводим локальные токеновые границы в глобальные, добавляя сдвиг
-        token_span_global = (token_start + global_token_offset, token_end + global_token_offset)
-
-        metadata = {
-            'source': source,
-            'level1_name': level1_name,
-            'level1_id': level1_id,
-            "order": k,
-            'char_span': (global_start, global_end),
-            'token_span': token_span_global,
-            'token_count': token_count
-        }
-        ls_doc.append(Doc(page_content=chunk, metadata=metadata))
-    return ls_doc
-'''
-
 def get_concat(s1, s2):
     """
-     склейка текстов s1, s2 с удалением повторов
-     Parameters:
-            s1 : string
-            s2 : string
-     Returns:
-            string
+    склейка текстов s1, s2 с удалением повторов
+    Parameters:
+        s1 : string
+        s2 : string
+    Returns:
+        string
     """
     l1 = len(s1)
     l2 = len(s2)
-    # print(l1, l2)
     flag = False
     res = None
     for i in range(l1 - 1, -1, -1):
@@ -573,11 +361,11 @@ def get_concat(s1, s2):
 
 def all_concat(*args):
     """
-     склейка всех текстов
-     Parameters:
-            args : list string
-     Returns:
-            string
+    склейка всех текстов
+    Parameters:
+        args : list string
+    Returns:
+        string
     """
     tmp = ''
     for el in args:
@@ -585,15 +373,14 @@ def all_concat(*args):
     return tmp
 
 
-# metadata = {'source':source, 'level0_name':level0_name, 'level0_id':level0_id, 'level1_name':level1_name, 'level1_id':level1_id, "order":k, 'id' : m}
 def meta_concat(meta1, meta2):
     """
-     склейка метданных для документов
-     Parameters:
-            meta1 : dict
-            meta2 : dict
-     Returns:
-            dict
+    склейка метданных для документов
+    Parameters:
+        meta1 : dict
+        meta2 : dict
+    Returns:
+        dict
     """
     meta_conc = dict()
     for key, value in meta1.items():
@@ -622,12 +409,12 @@ def meta_concat(meta1, meta2):
 
 def meta_mask(meta0, mask=[]):
     """
-         маскировка метданных для документов
-         Parameters:
-                meta0 : dict
-                mask  : список ключей для показа, остальные маскируются
-         Returns:
-                dict
+    маскировка метданных для документов
+    Parameters:
+        meta0: dict
+        mask: список ключей для показа, остальные маскируются
+    Returns:
+        dict
     """
     meta_conc = dict()
     if len(mask) < 0:
@@ -640,12 +427,12 @@ def meta_mask(meta0, mask=[]):
 
 def doc_concat(doc1, doc2):
     """
-         склейка документов
-         Parameters:
-                doc1 : документ
-                doc2 : документ
-         Returns:
-                документ
+    склейка документов
+    Parameters:
+        doc1 : документ
+        doc2 : документ
+    Returns:
+        документ
     """
     txt1 = doc1.page_content
     txt2 = doc2.page_content
@@ -659,11 +446,11 @@ def doc_concat(doc1, doc2):
 
 def all_doc_concat(*args):
     """
-     склейка всех документов
-     Parameters:
-            args : list документов
-     Returns:
-            документ
+    склейка всех документов
+    Parameters:
+        args : list документов
+    Returns:
+        документ
     """
     if args == ():
         return Doc.empty()
@@ -697,7 +484,7 @@ class Doc_Base():
         """
         заполняем базу документами из папки doc_path, разбиваем документы
         """
-        self.doc_path = doc_path  # Исправлено с self.path на doc_path
+        self.doc_path = doc_path
         self.fl_ls = [x for x in os.listdir(doc_path) if os.path.splitext(x)[1] == ".txt"] 
         self.txt_files_names = [f for f in os.listdir(doc_path) if os.path.isfile(os.path.join(doc_path, f)) and f.endswith('.txt')]
         self.make_txt_files_dict()
@@ -778,10 +565,10 @@ class Doc_Base():
     def make_docs_clear(self):
         pat = '\s{4,}'
         punct = re.escape(string.punctuation)
-        pattern_caps = rf'(?m)^[A-ZА-ЯЁ0-9\s{punct}]+$(?:\r?\n)?' # удаляет строки с русским капслоком
-        pattern_date = r'(?s)^.*?Дата\s+сохранения:\s*\d{2}[./-]\d{2}[./-]\d{4}[^\n]*\n?' #удаляет лишнюю метаинфу скачивания с консультанта (до "дата сохранения dd.mm.yyyy включительно")
+        pattern_caps = rf'(?m)^[A-ZА-ЯЁ0-9\s{punct}]+$(?:\r?\n)?' # Удаляет строки с русским капслоком
+        pattern_date = r'(?s)^.*?Дата\s+сохранения:\s*\d{2}[./-]\d{2}[./-]\d{4}[^\n]*\n?' #Удаляет лишнюю метаинфу скачивания с консультанта (до "дата сохранения dd.mm.yyyy включительно")
         pattern_consultant = r'(?m)^Документ предоставлен КонсультантПлюс\r?\n?'
-        pattern_dashes = r'-{3,}' #удаляет 3+ тире подряд
+        pattern_dashes = r'-{3,}' #Удаляет 3+ тире подряд
         pattern_ot = r'(?m:^(?:от.*(?:\r?\n|$)){2,})'
         patterns = [pattern_date, pattern_dashes, pattern_caps, pattern_consultant, pattern_ot]
         full_docs = []
@@ -797,9 +584,7 @@ class Doc_Base():
         self.full_docs = full_docs[:]
         return None
 
-    # Doc(page_content = x, metadata = {'source':source, 'level0_name':level0_name, 'level0_id':level0_id, 'level1_name':level1_name, 'level1_id':level1_id, "order":k, 'id' = k} )
     def split_docs(self):
-        # Инициализируем сплиттер с заданными параметрами:
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=300)
 
         ls_doc_01 = []
@@ -846,9 +631,7 @@ class Reranker():
         класс реранкер
     """
     def __init__(self, device, model_path):
-        # model_path = "/home/sav/work/DBRA_RAG/rank_model"
-        self.model_path = model_path
-        # 'DiTy/cross-encoder-russian-msmarco'
+        self.model_path = model_path # 'DiTy/cross-encoder-russian-msmarco'
         if device != 'cuda':
             self.reranker_model = CrossEncoder(self.model_path, max_length=512, device='cpu')
         else:
@@ -859,9 +642,6 @@ class Reranker():
         rank_result = self.reranker_model.rank(qst, [x.page_content for x in documents])
         res_ls = [(x['score'], documents[x['corpus_id']]) for x in rank_result[:k]]
         scores, res_docs = zip(*res_ls)
-        # for doc in res_docs:
-        #     if doc.metadata.get('is_empty', False):
-        #         print(qst)
         return res_docs
 
 class BM25:
@@ -912,7 +692,6 @@ class SearchBase():
 
         self.doc_reranker = Reranker(self.reranker_device, self.config.doc_reranker_name) 
 
-        #self.doc_bm25_db = bm25s.BM25(k1=1.5, b=0.75)
         self.doc_bm25_db = BM25(k1=1.5, b=0.75)
         self.stemmer = SnowballStemmer("russian")
         
@@ -928,13 +707,11 @@ class SearchBase():
         self.late_chunk_embedder = AutoModelForMaskedLM.from_pretrained(self.config.late_chunk_model_name, config=config)
         self.late_chunk_tokenizer = AutoTokenizer.from_pretrained("deepvk/RuModernBERT-base")
 
-        #self.late_chunk_embedder.half()
-
     def fill(self, doc_base):
         """
-           заполнение поисковой базы и создание индексов
-           Parameters:
-            doc_base : база документов по чанкам
+            заполнение поисковой базы и создание индексов
+            Parameters:
+                doc_base : база документов по чанкам
         """
         self.doc_base = doc_base
 
@@ -949,7 +726,6 @@ class SearchBase():
 
         self.doc_bm25_db.index(doc_corpus_tokens)
         self.doc_bm25_db.save(f'{self.config.base_path}/doc_bm25_db.pkl')
-        #self.doc_bm25_db.save(f'{self.config.base_path}/doc_bm25_db')
 
     def load(self):
         """
@@ -959,8 +735,6 @@ class SearchBase():
         self.doc_base.load()
 
         self.doc_bm25_db = BM25.load(f'{self.config.base_path}/doc_bm25_db.pkl')
-        #self.doc_bm25_db = BM25.load(f'{self.config.base_path}/doc_bm25_db')
-        #self.doc_bm25_db = bm25s.BM25.load(f'{self.config.base_path}/doc_bm25_db')
 
     def rerank_doc(self, qst, docs, K):
         return self.doc_reranker.rank(qst, docs, K)
@@ -1000,8 +774,8 @@ class SearchBase():
         В итоге выбираются топ 30 сегментов с наивысшей схожестью.
 
         Параметры:
-            qst     - строка запроса.
-            doc_base- база документов, где:
+            qst - строка запроса.
+            doc_base - база документов, где:
                       - doc_base.base – словарь с чанками,
                       - doc_base.full_docs – словарь, сопоставляющий source с полным текстом документа.
         Возвращает:
@@ -1009,7 +783,7 @@ class SearchBase():
         """
         self.doc_base = doc_base
         self.config.reload()
-        max_seq_len = self.config.max_seq_len  # максимально допустимое число токенов на сегмент
+        max_seq_len = self.config.max_seq_len  # Максимально допустимое число токенов на сегмент
 
         # Группируем чанки по source
         source_to_chunks = {}
@@ -1019,7 +793,7 @@ class SearchBase():
                 source_to_chunks[src] = []
             source_to_chunks[src].append(doc)
 
-        candidate_chunks = []  # список вида (doc, pooled_embedding)
+        candidate_chunks = []  # Список вида (doc, pooled_embedding)
 
         # Формируем словарь, сопоставляющий source с полным текстом, исходя из doc_base.full_docs (список объектов Doc)
         source_to_full = {}
@@ -1034,12 +808,12 @@ class SearchBase():
             hs_slice = hidden_states[seg_start:seg_end, ]
             mask_slice = expanded_mask[seg_start:seg_end, ]
             # Вычисляем сумму эмбеддингов с учётом маски
-            sum_embeddings = torch.sum(hs_slice * mask_slice, dim=0)
+            sum_embeddings = torch.sum(hs_slice * mask_slice, dim=0) 
             sum_mask = torch.clamp(mask_slice.sum(dim=0), min=1e-9)
             return sum_embeddings / sum_mask
 
-        candidate_docs = []    # список объектов Doc
-        candidate_embeddings = []  # список pooled-эмбеддингов (на GPU)
+        candidate_docs = [] # Список объектов Doc
+        candidate_embeddings = []  # Список pooled-эмбеддингов (на GPU)
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.late_chunk_embedder.to(device)
@@ -1049,7 +823,7 @@ class SearchBase():
         for src, chunks in source_to_chunks.items():
             # Извлекаем полный текст документа из full_docs
             if src not in source_to_full:
-                continue  # если для данного source нет полного текста, пропускаем его
+                continue  # Если для данного source нет полного текста, пропускаем его
             full_doc_text = source_to_full[src]
 
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1119,55 +893,19 @@ class SearchBase():
 
         return top_chunks
 
-    '''        
-        def cos_sim(x, y):
-            norm_x = np.linalg.norm(x)
-            norm_y = np.linalg.norm(y)
-            if norm_x == 0 or norm_y == 0:
-                return 0.0
-            return np.dot(x, y) / (norm_x * norm_y)
 
-        # Вычисляем сходство каждого pooled-эмбеддинга с эмбеддингом запроса
-        similarities = []
-        for doc, pooled_emb in candidate_chunks:
-            # Приводим pooled_emb к numpy, если это тензор
-            if isinstance(pooled_emb, torch.Tensor):
-                pooled_emb_np = pooled_emb.detach().cpu().numpy()
-            else:
-                pooled_emb_np = pooled_emb
-
-            sim = cos_sim(query_embedding_pooled, pooled_emb_np)
-            similarities.append(sim)
-
-        if len(similarities) == 0:
-            return []
-
-        top_indices = [int(i) for i in np.argsort(similarities)[-30:][::-1].flatten()]
-        top_chunks = [candidate_chunks[i][0] for i in top_indices]
-
-        return top_chunks
-    '''
-
-    # Doc(page_content = x, metadata = {'source':source, 'level0_name':level0_name, 'level0_id':level0_id, 'level1_name':level1_name, 'level1_id':level1_id, "order":k, 'id' = k} )
     def add_link(self, doc):
         meta = doc.metadata
         page_content = doc.page_content
-        # pref = "Информация об источнике данных \nДокумент: " + meta.get('source', 'неизвестен') + "\n" + "Раздел: " +  meta.get('level0_name', 'неизвестен') + "\n" + "Пункт: " +  meta.get('level1_name', 'неизвестен') + "\n"
         return Doc(page_content=page_content, metadata=meta)
 
     def llm_chat(self, llm, doc_ls, qst):
         self.config.reload()
         llm_config = self.config
-        #ls_result_new = self.expand(doc_ls, window=2)
-        #ls_result_new = self.expand_lev(doc_ls)
         prompt2 = llm_config.prompt_template_response
 
         new_ls = [self.add_link(x).page_content for x in doc_ls]
-        # print(new_ls)
-        #new_ls = [self.x.page_content for x in doc_ls]
         prompt2 = prompt2.replace("{context}", '\n'.join(new_ls)).replace("{qst}", qst)
-        #print(prompt2)
-        #llm.change_temp(llm_config.temperature_response_gen)
         res = llm.invoke(prompt2)
         return res, doc_ls, prompt2
     
@@ -1195,7 +933,6 @@ class SearchBase():
         qq3 = self.search_doc(qst, doc_K1, doc_base)
         res3 = self.rerank_doc(qst, qq3, doc_K2)
 
-        # llm_res, exp_docs, prompt = search_base.llm_chat(llm, res3, qst)
         llm_res, exp_docs, prompt = self.llm_chat(llm, res3, qst)
         return llm_res, qq3, res3, exp_docs, prompt
 
@@ -1214,9 +951,7 @@ class SearchBase():
             ls_ids = [k for k in range(doc_id - window, doc_id + window + 1) if k >= 0 and k < base_len]
             ls_docs = [self.get_doc(k) for k in ls_ids]
             ls_docs = [doc for doc in ls_docs if src == doc.metadata.get('source', '')]
-            # print(ls_docs)
             tmp_ls.append(all_doc_concat(*ls_docs))
-        # print(tmp_ls)
         return tmp_ls
 
     def get_all_children(self, doc, N=10):
@@ -1234,7 +969,6 @@ class SearchBase():
         docs = [x for x in tmp_docs if x.metadata.get('source', '') == src and level1_name == x.metadata.get('level1_name', '')[:ln]]
         return docs
 
-    # Doc(page_content = x, metadata = {'source':source, 'level0_name':level0_name, 'level0_id':level0_id, 'level1_name':level1_name, 'level1_id':level1_id, "order":k, 'id' = k} )
     def expand_lev(self, res_ls):
         """
             self.doc_base.base = base
@@ -1242,7 +976,6 @@ class SearchBase():
         """
         tmp_ls = []
         for res in res_ls:
-            # print(res)
             doc_id = res.metadata.get('id', -1)
             src = res.metadata.get('source', '')
             #level0_name = res.metadata.get('level0_name', '')
@@ -1254,7 +987,6 @@ class SearchBase():
                 ls_ch = self.get_all_children(res, N=10)
                 doc0 = all_doc_concat(*ls_ch)
                 expanded = True
-                # print(doc0)
             if expanded:
                 ls_id = [key for key in self.doc_base.base.keys() if
                          (key < doc_id + 10) and (key > doc_id - 10) and (key != doc_id)]
@@ -1275,53 +1007,3 @@ class SearchBase():
         for doc in ls_docs:
             print(doc)
             print(' --- ' * 3)
-
-
-class EmptyLLM():
-    """
-    класс EmptyLLM
-    """
-
-    def __init__(self, config):
-        self.config = config
-        self.mod_name = 'Empty_model'
-        self.llm = None
-        self.tokenizer = None
-        self.temperature = 0.2
-
-    def invoke(self, prmt):
-        search_config = self.config
-        sys_prompt = search_config.system_prompt
-        try:
-            messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": prmt}]
-            res0 = prmt
-            res0 = "Проверка работы бота"
-        except Exception as ex:
-            print(ex)
-            res0 = None
-        return res0
-
-    def change_temp(self, temp):
-        pass
-
-
-class RAG():
-    def __init__(self, config):
-        logger.info("RAG init")
-        self.search_base = SearchBase(config)
-        self.search_base.load()
-
-        logger.info("базы загружены")
-        # self.my_llm = EmptyLLM(config)
-
-
-    def response(self, qst):
-        logger.info("RAG response")
-        additional_info = " ======= "
-        full_res = self.search_base.get_response(llm=self.my_llm, qst=qst)
-        logger.info(self.my_llm.temperature)
-        logger.info(full_res[0])
-        logger.info(doc_str(full_res[2]))
-        logger.info(full_res[7])
-        return full_res
-

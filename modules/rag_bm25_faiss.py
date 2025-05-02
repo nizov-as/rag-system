@@ -2,21 +2,13 @@ import re
 import logging
 from split_util import RecursiveCharacterTextSplitter
 from split_util import Doc
-import pandas as pd
 import numpy as np
 import os
 import re
 import pickle as pkl
-from datetime import datetime
-import inspect
-import configparser
 from tqdm.notebook import tqdm
-from dataclasses import dataclass
-import random
-#import bm25s
 from rank_bm25 import BM25Okapi # type: ignore
 import faiss
-from collections import OrderedDict
 from nltk.stem import SnowballStemmer
 from nltk.tokenize import word_tokenize
 from nltk import download
@@ -24,10 +16,8 @@ import nltk
 import string
 import torch
 import torch.nn.functional as F
-
-from sentence_transformers import SentenceTransformer
 from sentence_transformers import CrossEncoder
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoModel, AutoConfig, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModel, AutoConfig
 
 logger = logging.getLogger(__name__)
 
@@ -115,8 +105,6 @@ def level1_split(doc):
         ls_tec = []
         for m in l_match:
             idx = idx_match(m.groups())
-            # print(m.groups())
-            # print(idx)
             group = m.group().replace("\n", "")
             span = m.span()
             metadata = {'source': source, 'level1_name': group, 'level1_id': idx}
@@ -142,8 +130,6 @@ def level2_split(doc, text_splitter):
     """
     txt = doc.page_content
     source = doc.metadata['source']
-    #level0_name = doc.metadata['level0_name']
-    #level0_id = doc.metadata['level0_id']
     level1_name = doc.metadata['level1_name']
     level1_id = doc.metadata['level1_id']
     
@@ -163,7 +149,6 @@ def get_concat(s1, s2):
     """
     l1 = len(s1)
     l2 = len(s2)
-    # print(l1, l2)
     flag = False
     res = None
     for i in range(l1 - 1, -1, -1):
@@ -193,7 +178,6 @@ def all_concat(*args):
     return tmp
 
 
-# metadata = {'source':source, 'level0_name':level0_name, 'level0_id':level0_id, 'level1_name':level1_name, 'level1_id':level1_id, "order":k, 'id' : m}
 def meta_concat(meta1, meta2):
     """
      склейка метданных для документов
@@ -403,7 +387,6 @@ class Doc_Base():
         self.full_docs = full_docs[:]
         return None
 
-    # Doc(page_content = x, metadata = {'source':source, 'level0_name':level0_name, 'level0_id':level0_id, 'level1_name':level1_name, 'level1_id':level1_id, "order":k, 'id' = k} )
     def split_docs(self):
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=300)
         ls_doc_02 = []
@@ -440,17 +423,15 @@ class Reranker():
         класс реранкер
     """
     def __init__(self, device, model_path):
-        self.model_path = model_path
-        # 'DiTy/cross-encoder-russian-msmarco'
+        self.model_path = model_path # 'DiTy/cross-encoder-russian-msmarco'
+
         if device != 'cuda':
             self.reranker_model = CrossEncoder(self.model_path, max_length=512, device='cpu')
         else:
             self.reranker_model = CrossEncoder(self.model_path, max_length=512, device='cuda')
         self.device = device
 
-        # Загрузка базового токенизатора для реранкера
         base_tokenizer = AutoTokenizer.from_pretrained("DiTy/cross-encoder-russian-msmarco")
-        # Сохранение токенизатора в указанную директорию
         base_tokenizer.save_pretrained("./reranker_finetuned")
 
     def rank(self, qst, documents, k=5):
@@ -537,7 +518,6 @@ class SearchBase():
         self.reranker_device = self.config.reranker_device
         self.doc_reranker = Reranker(self.reranker_device, self.config.doc_reranker_name) 
         self.doc_bm25_db = BM25(k1=1.5, b=0.75)
-        #self.doc_bm25_db = bm25s.BM25(k1=1.5, b=0.75)
         self.doc_faiss_db = faiss.IndexFlatIP(self.doc_vec_size)
         self.stemmer = SnowballStemmer("russian")
 
@@ -596,7 +576,6 @@ class SearchBase():
             vec.append(self.encode_text(doc_corpus_docs[k], normalize_embeddings=True, device="cpu"))
         self.doc_faiss_db.add(np.array(vec))
         self.doc_bm25_db.save(f'{self.config.base_path}/doc_bm25_db.pkl')
-        #self.doc_bm25_db.save(f'{self.config.base_path}/doc_bm25_db')
         faiss.write_index(self.doc_faiss_db, f"{self.config.base_path}/doc_faiss_db.bin")
 
     def load(self):
@@ -606,7 +585,6 @@ class SearchBase():
         self.doc_base = Doc_Base(path=self.config.base_path)
         self.doc_base.load()
         self.doc_faiss_db = faiss.read_index(f"{self.config.base_path}/doc_faiss_db.bin")
-        #self.doc_bm25_db = bm25s.BM25.load(f'{self.config.base_path}/doc_bm25_db')
         self.doc_bm25_db = BM25.load(f'{self.config.base_path}/doc_bm25_db.pkl')
 
     def rerank_doc(self, qst, docs, K):
@@ -615,8 +593,8 @@ class SearchBase():
     def search_doc(self, qst, kt, doc_base):
         """
         Поиск документов по запросу:
-         - Сначала ищем по BM25
-         - Затем дополняем результаты поиском по эмбеддингам через FAISS
+            - Сначала ищем по BM25
+            - Затем дополняем результаты поиском по эмбеддингам через FAISS
         """
         self.doc_base = doc_base
         self.config.reload()
@@ -641,26 +619,18 @@ class SearchBase():
 
         return ls_doc
 
-    # Doc(page_content = x, metadata = {'source':source, 'level0_name':level0_name, 'level0_id':level0_id, 'level1_name':level1_name, 'level1_id':level1_id, "order":k, 'id' = k} )
     def add_link(self, doc):
         meta = doc.metadata
         page_content = doc.page_content
-        # pref = "Информация об источнике данных \nДокумент: " + meta.get('source', 'неизвестен') + "\n" + "Раздел: " +  meta.get('level0_name', 'неизвестен') + "\n" + "Пункт: " +  meta.get('level1_name', 'неизвестен') + "\n"
         return Doc(page_content=page_content, metadata=meta)
 
     def llm_chat(self, llm, doc_ls, qst):
         self.config.reload()
         llm_config = self.config
-        #ls_result_new = self.expand(doc_ls, window=2)
-        #ls_result_new = self.expand_lev(doc_ls)
         prompt2 = llm_config.prompt_template_response
 
         new_ls = [self.add_link(x).page_content for x in doc_ls]
-        # print(new_ls)
-        #new_ls = [self.x.page_content for x in doc_ls]
         prompt2 = prompt2.replace("{context}", '\n'.join(new_ls)).replace("{qst}", qst)
-        #print(prompt2)
-        #llm.change_temp(llm_config.temperature_response_gen)
         res = llm.invoke(prompt2)
         return res, doc_ls, prompt2
     
@@ -688,7 +658,6 @@ class SearchBase():
         qq3 = self.search_doc(qst, doc_K1, doc_base)
         res3 = self.rerank_doc(qst, qq3, doc_K2)
 
-        # llm_res, exp_docs, prompt = search_base.llm_chat(llm, res3, qst)
         llm_res, exp_docs, prompt = self.llm_chat(llm, res3, qst)
         return llm_res, qq3, res3, exp_docs, prompt
 
@@ -707,9 +676,7 @@ class SearchBase():
             ls_ids = [k for k in range(doc_id - window, doc_id + window + 1) if k >= 0 and k < base_len]
             ls_docs = [self.get_doc(k) for k in ls_ids]
             ls_docs = [doc for doc in ls_docs if src == doc.metadata.get('source', '')]
-            # print(ls_docs)
             tmp_ls.append(all_doc_concat(*ls_docs))
-        # print(tmp_ls)
         return tmp_ls
 
     def get_all_children(self, doc, N=10):
@@ -727,7 +694,6 @@ class SearchBase():
         docs = [x for x in tmp_docs if x.metadata.get('source', '') == src and level1_name == x.metadata.get('level1_name', '')[:ln]]
         return docs
 
-    # Doc(page_content = x, metadata = {'source':source, 'level0_name':level0_name, 'level0_id':level0_id, 'level1_name':level1_name, 'level1_id':level1_id, "order":k, 'id' = k} )
     def expand_lev(self, res_ls):
         """
             self.doc_base.base = base
@@ -735,10 +701,8 @@ class SearchBase():
         """
         tmp_ls = []
         for res in res_ls:
-            # print(res)
             doc_id = res.metadata.get('id', -1)
             src = res.metadata.get('source', '')
-            #level0_name = res.metadata.get('level0_name', '')
             level1_name = res.metadata.get('level1_name', '')
             txt_len = len(res.page_content)
             ls_ch = []
@@ -747,7 +711,6 @@ class SearchBase():
                 ls_ch = self.get_all_children(res, N=10)
                 doc0 = all_doc_concat(*ls_ch)
                 expanded = True
-                # print(doc0)
             if expanded:
                 ls_id = [key for key in self.doc_base.base.keys() if
                          (key < doc_id + 10) and (key > doc_id - 10) and (key != doc_id)]
@@ -768,53 +731,4 @@ class SearchBase():
         for doc in ls_docs:
             print(doc)
             print(' --- ' * 3)
-
-
-class EmptyLLM():
-    """
-     класс EmptyLLM
-    """
-
-    def __init__(self, config):
-        self.config = config
-        self.mod_name = 'Empty_model'
-        self.llm = None
-        self.tokenizer = None
-        self.temperature = 0.2
-
-    def invoke(self, prmt):
-        search_config = self.config
-        sys_prompt = search_config.system_prompt
-        try:
-            messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": prmt}]
-            res0 = prmt
-            res0 = "Проверка работы бота"
-        except Exception as ex:
-            print(ex)
-            res0 = None
-        return res0
-
-    def change_temp(self, temp):
-        pass
-
-
-class RAG():
-    def __init__(self, config):
-        logger.info("RAG init")
-        self.search_base = SearchBase(config)
-        self.search_base.load()
-
-        logger.info("базы загружены")
-        # self.my_llm = EmptyLLM(config)
-
-
-    def response(self, qst):
-        logger.info("RAG response")
-        additional_info = " ======= "
-        full_res = self.search_base.get_response(llm=self.my_llm, qst=qst)
-        logger.info(self.my_llm.temperature)
-        logger.info(full_res[0])
-        logger.info(doc_str(full_res[2]))
-        logger.info(full_res[7])
-        return full_res
 
